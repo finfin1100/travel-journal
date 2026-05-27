@@ -17,6 +17,7 @@ export default function Home() {
   const [tripTitle, setTripTitle] = useState("台灣三日遊 🇹🇼");
   const [weatherLocation, setWeatherLocation] = useState("新竹");
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
   //const [tripDate, setTripDate] = useState("07/13 - 07/17");
 
   const [days, setDays] = useState([
@@ -69,24 +70,35 @@ export default function Home() {
       if (savedDarkMode) {
         setIsDarkMode(JSON.parse(savedDarkMode));
       }
+
+      setIsLoaded(true);
     }, 0);
   }, []);
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     localStorage.setItem("days", JSON.stringify(days));
-  }, [days]);
+  }, [days, isLoaded]);
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     localStorage.setItem("schedules", JSON.stringify(schedules));
-  }, [schedules]);
+  }, [schedules, isLoaded]);
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     localStorage.setItem("tripTitle", tripTitle);
-  }, [tripTitle]);
+  }, [tripTitle, isLoaded]);
 
   useEffect(() => {
+    if (!isLoaded) return;
+
     localStorage.setItem("isDarkMode", JSON.stringify(isDarkMode));
-  }, [isDarkMode]);
+  }, [isDarkMode, isLoaded]);
+  
   useEffect(() => {
     const currentDay = dayRefs.current[selectedDay - 1];
 
