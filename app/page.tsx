@@ -4,6 +4,13 @@
 import { useEffect, useRef, useState } from "react";
 
 export default function Home() {
+  const [newStartTime, setNewStartTime] = useState("");
+  const [newEndTime, setNewEndTime] = useState("");
+  const [newTitle, setNewTitle] = useState("");
+  const [newNote, setNewNote] = useState("");
+  const [newImage, setNewImage] = useState("");
+  const [newTag, setNewTag] = useState("景點");
+
   const [selectedDay, setSelectedDay] = useState(1);
   const [activeTab, setActiveTab] = useState("行程");
   const [travelMode, setTravelMode] = useState("driving");
@@ -41,26 +48,28 @@ export default function Home() {
   >([]);
 
   useEffect(() => {
-    const savedDays = localStorage.getItem("days");
-    const savedSchedules = localStorage.getItem("schedules");
-    const savedTripTitle = localStorage.getItem("tripTitle");
-    const savedDarkMode = localStorage.getItem("isDarkMode");
+    setTimeout(() => {
+      const savedDays = localStorage.getItem("days");
+      const savedSchedules = localStorage.getItem("schedules");
+      const savedTripTitle = localStorage.getItem("tripTitle");
+      const savedDarkMode = localStorage.getItem("isDarkMode");
 
-    if (savedDays) {
-      setDays(JSON.parse(savedDays));
-    }
+      if (savedDays) {
+        setDays(JSON.parse(savedDays));
+      }
 
-    if (savedSchedules) {
-      setSchedules(JSON.parse(savedSchedules));
-    }
+      if (savedSchedules) {
+        setSchedules(JSON.parse(savedSchedules));
+      }
 
-    if (savedTripTitle) {
-      setTripTitle(savedTripTitle);
-    }
+      if (savedTripTitle) {
+        setTripTitle(savedTripTitle);
+      }
 
-    if (savedDarkMode) {
-      setIsDarkMode(JSON.parse(savedDarkMode));
-    }
+      if (savedDarkMode) {
+        setIsDarkMode(JSON.parse(savedDarkMode));
+      }
+    }, 0);
   }, []);
 
   useEffect(() => {
@@ -91,39 +100,36 @@ export default function Home() {
   }, [selectedDay]);
 
   useEffect(() => {
-    const currentDaySchedules = schedules
-      .filter((item) => item.day === selectedDay)
-      .sort((a, b) => a.endTime.localeCompare(b.endTime));
+    setTimeout(() => {
+      const currentDaySchedules = schedules
+        .filter((item) => item.day === selectedDay)
+        .sort((a, b) => a.endTime.localeCompare(b.endTime));
 
-    const lastSchedule = currentDaySchedules[currentDaySchedules.length - 1];
+      const lastSchedule = currentDaySchedules[currentDaySchedules.length - 1];
 
-    if (lastSchedule) {
-      setNewStartTime(lastSchedule.endTime);
+      if (lastSchedule) {
+        setNewStartTime(lastSchedule.endTime);
 
-      const [hour, minute] = lastSchedule.endTime.split(":").map(Number);
+        const [hour, minute] = lastSchedule.endTime.split(":").map(Number);
 
-      const endDate = new Date();
-      endDate.setHours(hour + 1);
-      endDate.setMinutes(minute);
+        const endDate = new Date();
+        endDate.setHours(hour + 1);
+        endDate.setMinutes(minute);
 
-      const endHour = String(endDate.getHours()).padStart(2, "0");
-      const endMinute = String(endDate.getMinutes()).padStart(2, "0");
+        const endHour = String(endDate.getHours()).padStart(2, "0");
+        const endMinute = String(endDate.getMinutes()).padStart(2, "0");
 
-      setNewEndTime(`${endHour}:${endMinute}`);
-    } else {
-      setNewStartTime("08:00");
-      setNewEndTime("09:00");
-    }
+        setNewEndTime(`${endHour}:${endMinute}`);
+      } else {
+        setNewStartTime("08:00");
+        setNewEndTime("09:00");
+      }
+    }, 0);
   }, [selectedDay, schedules]);
 
 
 
-  const [newStartTime, setNewStartTime] = useState("");
-  const [newEndTime, setNewEndTime] = useState("");
-  const [newTitle, setNewTitle] = useState("");
-  const [newNote, setNewNote] = useState("");
-  const [newImage, setNewImage] = useState("");
-  const [newTag, setNewTag] = useState("景點");
+
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
   const dayRefs = useRef<(HTMLDivElement | null)[]>([]);
   const dateInputRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -230,7 +236,7 @@ export default function Home() {
 
       const geoData = await geoRes.json();
       const location = geoData.results?.find(
-        (item: any) => item.country_code === "TW"
+        (item: { country_code?: string }) => item.country_code === "TW"
       ) || geoData.results?.[0];
 
       if (!location) {
