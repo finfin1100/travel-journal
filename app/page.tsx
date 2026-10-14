@@ -30,7 +30,13 @@ import {
   type Stay,
   type Expense,
 } from "../lib/travel";
-import { readJournal, writeJournal, STORAGE_KEY } from "../lib/storage";
+import { STORAGE_KEY } from "../lib/storage";
+import {
+  browserStorage,
+  loadPersistentJournal,
+  requestPersistentStorage,
+  savePersistentJournal,
+} from "../lib/persistence";
 import { compressPhoto, getWeather, nearestOrder } from "../lib/services";
 
 type Tab = "行程" | "地圖" | "住宿" | "預算" | "收藏" | "我的";
@@ -121,6 +127,10 @@ export default function Home() {
   const [journal, setJournal] = useState<Journal | null>(null);
   const current = useRef<Journal | null>(null);
   const unsaved = useRef(false);
+  const latestSave = useRef(0);
+  const mounted = useRef(false);
+  const syncChannel = useRef<BroadcastChannel | null>(null);
+  const [persistentStorage, setPersistentStorage] = useState<string>("");
   const [fatal, setFatal] = useState("");
   const [notice, setNotice] = useState("");
   const [saveState, setSaveState] = useState("讀取中");
@@ -138,23 +148,44 @@ export default function Home() {
   const dragId = useRef<number | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    const timer = setTimeout(() => {
+    mounted.current = true;
+    const timer = setTimeout(async () => {
       try {
-        const data = readJournal(localStorage);
+        const loaded = await loadPersistentJournal();
+        if (!mounted.current) return;
+        const data = loaded.journal;
         current.current = data;
         setJournal(data);
-        setSaveState("已讀取本機資料");
+        setSaveState(
+          loaded.recovered ? "已從本機備援還原資料" : "已讀取上次保存的資料",
+        );
+        if (loaded.recovered)
+          setNotice(
+            "已找回本機備援中的旅行資料。你可以繼續使用，也建議匯出一份備份。",
+          );
+        if (loaded.needsInitialSave) storeJournal(data);
       } catch (e) {
-        setFatal(message(e));
+        if (mounted.current) setFatal(message(e));
       }
     }, 0);
+    const flagConflict = () => {
+      conflictRef.current = true;
+      setConflict(true);
+    };
+    try {
+      if (typeof BroadcastChannel !== "undefined") {
+        syncChannel.current = new BroadcastChannel("travel-journal-saves");
+        syncChannel.current.onmessage = flagConflict;
+      }
+    } catch {
+      /* The storage event still protects normal localStorage writes. */
+    }
     const onStorage = (e: StorageEvent) => {
       if (
-        e.storageArea === localStorage &&
+        e.storageArea === browserStorage() &&
         (e.key === STORAGE_KEY || e.key === null)
       ) {
-        conflictRef.current = true;
-        setConflict(true);
+        flagConflict();
       }
     };
     window.addEventListener("storage", onStorage);
@@ -166,26 +197,48 @@ export default function Home() {
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => {
+      mounted.current = false;
+      syncChannel.current?.close();
+      syncChannel.current = null;
       clearTimeout(timer);
       request.current?.abort();
       window.removeEventListener("storage", onStorage);
       window.removeEventListener("beforeunload", onBeforeUnload);
     };
   }, []);
+  function storeJournal(data: Journal) {
+    const saved = savePersistentJournal(data);
+    latestSave.current = saved.revision;
+    unsaved.current = !saved.localSaved;
+    setSaveState(
+      saved.localSaved
+        ? "已儲存，下次開啟會保留（正在建立備援）"
+        : "正在儲存到本機備援，請暫勿關閉頁面…",
+    );
+    if (saved.localSaved) syncChannel.current?.postMessage(saved.revision);
+    void saved.backup.then((backupSaved) => {
+      if (!mounted.current || latestSave.current !== saved.revision) return;
+      unsaved.current = !saved.localSaved && !backupSaved;
+      setSaveState(
+        saved.localSaved && backupSaved
+          ? "已儲存並備援，下次開啟會保留"
+          : saved.localSaved
+            ? "已儲存，下次開啟會保留（備援暫不可用）"
+            : backupSaved
+              ? "已儲存到本機備援，下次開啟會還原"
+              : "尚未儲存：瀏覽器無法保存資料。請立即匯出備份。",
+      );
+      if (!saved.localSaved && backupSaved)
+        syncChannel.current?.postMessage(saved.revision);
+    });
+  }
   function commit(next: Journal) {
     if (conflictRef.current)
       throw new Error("另一個分頁已更新資料。請先備份目前畫面，再重新載入。");
     const checked = parseBackup(next);
     current.current = checked;
     setJournal(checked);
-    try {
-      writeJournal(localStorage, checked);
-      unsaved.current = false;
-      setSaveState("已儲存於此瀏覽器");
-    } catch {
-      unsaved.current = true;
-      setSaveState("尚未儲存：空間不足或瀏覽器禁止儲存。請立即匯出備份。");
-    }
+    storeJournal(checked);
   }
   function change(id: number, update: (trip: Trip) => Trip) {
     const data = current.current;
@@ -1304,7 +1357,7 @@ export default function Home() {
                 <div className="panel">
                   <h3>備份與還原</h3>
                   <p>
-                    資料只存在目前瀏覽器，沒有雲端同步。清除瀏覽器資料、更換裝置或網址，可能無法看到原資料。
+                    按下儲存後，正常關閉瀏覽器或重新開機，下次用同一個瀏覽器、同一個網址打開，旅行資料仍會保留，並有本機備援。資料尚未同步到雲端；無痕模式、清除網站資料或更換瀏覽器不適用。
                   </p>
                   <div className="actions">
                     <button
@@ -1326,7 +1379,27 @@ export default function Home() {
                     >
                       重新嘗試儲存
                     </button>
+                    <button
+                      onClick={async () => {
+                        setPersistentStorage("正在確認資料保留設定…");
+                        const granted = await requestPersistentStorage();
+                        setPersistentStorage(
+                          granted === true
+                            ? "已開啟長期保留，降低瀏覽器自動清理資料的機會。"
+                            : granted === false
+                              ? "瀏覽器未批准額外保留。一般本機儲存仍可跨次開啟使用，建議定期匯出備份。"
+                              : "此瀏覽器未提供額外保留設定；一般本機儲存仍會保留已保存資料。",
+                        );
+                      }}
+                    >
+                      加強資料保留
+                    </button>
                   </div>
+                  {persistentStorage && (
+                    <p className="hint" role="status">
+                      {persistentStorage}
+                    </p>
+                  )}
                   <p className="hint">
                     備份包含照片與備註，請妥善保管。匯入會取代全部旅行，先驗證再確認，不會在驗證失敗時清空資料。
                   </p>
