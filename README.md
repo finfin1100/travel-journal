@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 旅行手記
 
-## Getting Started
+個人旅行規劃網頁，使用 Next.js 15、React 18、TypeScript。無帳號、無資料庫，旅行資料儲存在目前瀏覽器。
 
-First, run the development server:
+## 本機啟動
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+在此專案資料夾的 VS Code 終端機執行：
+
+```powershell
+npm ci
+npm run dev -- --hostname 127.0.0.1
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+開啟 http://localhost:3000 。修改原始碼後開發模式會自動更新。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+正式模式：`npm run build`，再執行 `npm run start -- --hostname 127.0.0.1`。
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## 功能
 
-## Learn More
+- 多趟旅行、日期與同行人數、每日行程、時間重疊檢查。
+- 拖曳或上下鍵重排：保留各活動時長、原位置間隔，清除過時的交通分鐘數。
+- 行程照片：最大 12 MB，瀏覽器內縮圖壓縮為 WebP（GIF 保留靜態畫面）。
+- 台灣城市天氣：手動更新未來約 16 天預報，其他日期明確標示無預報。
+- 地圖搜尋、分段導航、台灣地點近距離排序（非最短行車路線）。
+- 住宿日期、訂房狀態、總額、備註。
+- 行程＋住宿＋額外費用加總、分類預算、每人平均與超支提示。
+- 收藏、完整深淺色模式、手機底部導覽。
+- JSON 備份匯入／匯出、資料驗證、儲存失敗與跨分頁衝突提醒。
 
-To learn more about Next.js, take a look at the following resources:
+## 資料安全與相容
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+新版使用單一 `localStorage` 鍵 `travel-journal.v2`。第一次讀取時相容舊版的 `trips` / `activeTripId`，以及更早的 `days` / `schedules` / `tripTitle`。第一次修改後寫入新版鍵，**不會刪除或覆寫舊版鍵**。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+請先到「我的 → 匯出全部旅行」備份。備份包含照片和個人備註，請妥善保管。匯入先驗證，成功後才詢問是否取代全部旅行；失敗不變更現有資料。原資料損毀時提供原始救援檔下載，不會靜默清空。
 
-## Deploy on Vercel
+瀏覽器資料依「協定＋主機＋連接埠」隔離。`localhost:3000`、`127.0.0.1:3000`、`:4173` 彼此不同，Codex 內建瀏覽器和 Edge 也不共用。換網址／瀏覽器時請由舊位置匯出，再在新位置匯入。看不到舊資料不代表已刪除。
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+空間不足時，畫面保留尚未儲存的修改並顯示警告；請立即匯出，不要直接重新整理。另一分頁更新資料時，此頁暫停寫入，可先匯出此頁，再重新載入。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+所有金額以旅行所選幣別記錄，**不會自動換匯**。住宿填整筆總額，不是每晚價格；不要在住宿和行程重複記帳。最多 50 趟旅行、每趟 90 天、每類 1,000 筆項目；備份匯入上限 30 MB（實際瀏覽器儲存額度通常更小）。
+
+## 外部服務
+
+天氣按鈕會向 Open-Meteo 傳送城市名稱。距離排序經確認後向 OpenStreetMap Nominatim 傳送行程地點，逐筆查詢（至少間隔 1.1 秒）並使用工作階段快取。地圖連結交由 Google Maps 顯示。服務需網路，可能受流量或地點資料品質影響；請自行核對地址、營業時間與路況。
+
+Google Maps 手機路線最多 5 站一段，大眾運輸採兩站分段。距離排序支援每日 3–12 個台灣地點，固定第一站，以直線距離近鄰法提出建議，確認後才套用，不保證全域最佳路線。
+
+## 開發驗證
+
+```powershell
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
+
+純邏輯測試位於 `tests/model.test.cjs`，不需要額外測試套件。涵蓋舊資料相容、損毀資料、備份驗證、日期、時間衝突、排序、預算、地圖與天氣錯誤。
+
+主要模組：`app/page.tsx`（操作介面）、`app/globals.css`（響應式樣式）、`lib/travel.ts`（資料模型與驗證）、`lib/storage.ts`（儲存與相容）、`lib/services.ts`（天氣、地點、照片）。
+
+## 已知驗證與依賴限制
+
+本次已更新 Next.js 15.4.8 → 15.5.27 並對齊 React 18 型別，也套用非破壞性的依賴修補。依賴稽核仍有 7 項通報（1 中、6 高），主要為工具鏈的 `braces` / `micromatch` / `fast-glob` 以及 Next.js 內嵌 PostCSS。未執行會降版或升級主要框架的 `npm audit fix --force`；**正式公開部署前，應另外處理剩餘依賴通報並驗證升級**。
+
+Codex 測試環境的 Windows 原生 `realpath` 呼叫回報 EPERM，已用限定本專案的 JavaScript 路徑解析相容程序完成正式建置；網站原始碼沒有加入此環境專用程序。若在 Codex 中直接執行建置遇到「缺少 TypeScript」但套件實際已安裝，請改由 VS Code 的一般終端機執行。
+
+本次瀏覽器程序啟動／本機連線受到執行環境限制，因此沒有完成真實瀏覽器視覺驗收。另以獨立模擬 DOM 執行介面流程檢查；這不能取代手機實機、照片上傳與外部服務實際連線驗收。
+
+2026-10-13 續作驗收：13 項純邏輯測試、21 項模擬 DOM 介面流程、TypeScript 檢查與正式建置皆通過。同一測試程序內的正式伺服器首頁、8 個 CSS／JavaScript 資源均回應 HTTP 200，不存在的頁面回應 404。另確認匯入壞檔不覆寫資料、正常備份可還原、跨分頁衝突阻止覆寫，以及儲存失敗時保留未儲存畫面。測試全部使用獨立範例資料，沒有讀取或覆寫使用者瀏覽器內的旅行資料。

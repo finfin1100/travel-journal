@@ -1,1186 +1,1705 @@
 "use client";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type FormEvent,
+} from "react";
+import Image from "next/image";
+import {
+  TAGS,
+  CURRENCIES,
+  addDays,
+  budgetSummary,
+  createTrip,
+  localDate,
+  makeDays,
+  mapUrl,
+  newId,
+  nights,
+  parseBackup,
+  reorderDay,
+  routeUrl,
+  scheduleError,
+  toMinutes,
+  toTime,
+  type Journal,
+  type Trip,
+  type Schedule,
+  type Stay,
+  type Expense,
+} from "../lib/travel";
+import { readJournal, writeJournal, STORAGE_KEY } from "../lib/storage";
+import { compressPhoto, getWeather, nearestOrder } from "../lib/services";
 
-
-import { useEffect, useRef, useState } from "react";
+type Tab = "行程" | "地圖" | "住宿" | "預算" | "收藏" | "我的";
+type Editor =
+  | { kind: "trip"; item?: Trip }
+  | { kind: "schedule"; item?: Schedule }
+  | { kind: "stay"; item?: Stay }
+  | { kind: "expense"; item?: Expense };
+const icons = ["◷", "↗", "⌂", "＄", "♡", "⚙"];
+const message = (e: unknown) =>
+  e instanceof Error ? e.message : "操作失敗，請再試一次。";
+function download(name: string, data: unknown) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+  );
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function Field({
+  label,
+  children,
+  wide = false,
+}: {
+  label: string;
+  children: ReactNode;
+  wide?: boolean;
+}) {
+  return (
+    <label className={wide ? "field wide" : "field"}>
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+function Empty({
+  title,
+  children,
+  action,
+}: {
+  title: string;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="empty">
+      <span className="empty-icon">✧</span>
+      <h3>{title}</h3>
+      <p>{children}</p>
+      {action}
+    </div>
+  );
+}
+function Modal({
+  title,
+  close,
+  children,
+}: {
+  title: string;
+  close: () => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+  return (
+    <dialog ref={ref} onCancel={close} aria-labelledby="editor-title">
+      <div className="dialog-head">
+        <h2 id="editor-title">{title}</h2>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="關閉視窗"
+          onClick={close}
+        >
+          ×
+        </button>
+      </div>
+      {children}
+    </dialog>
+  );
+}
 
 export default function Home() {
-  const [newStartTime, setNewStartTime] = useState("");
-  const [newEndTime, setNewEndTime] = useState("");
-  const [newTitle, setNewTitle] = useState("");
-  const [newNote, setNewNote] = useState("");
-  const [newImage, setNewImage] = useState("");
-  const [newTag, setNewTag] = useState("景點");
-
-  const [selectedDay, setSelectedDay] = useState(1);
-  const [activeTab, setActiveTab] = useState("行程");
-  const [travelMode, setTravelMode] = useState("driving");
-  const [tripTitle, setTripTitle] = useState("台灣三日遊 🇹🇼");
-  const [weatherLocation, setWeatherLocation] = useState("新竹");
-  const [isDarkMode, setIsDarkMode] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-  //const [tripDate, setTripDate] = useState("07/13 - 07/17");
-
-  const [days, setDays] = useState([
-    { day: 1, date: "2026-05-21", weather: "", temperature: "" },
-    { day: 2, date: "2026-05-22", weather: "", temperature: "" },
-    { day: 3, date: "2026-05-23", weather: "", temperature: "" },
-  ]);
-  const formatDate = (dateString: string) => {
-    return `${Number(dateString.slice(5, 7))}/${Number(dateString.slice(8, 10))}`;
-  };
-
-  const tripDate =
-    days.length > 0
-      ? `${formatDate(days[0].date)} - ${formatDate(days[days.length - 1].date)}`
-      : "";
-
-  const [schedules, setSchedules] = useState<
-    {
-      id: number;
-      day: number;
-      startTime: string;
-      endTime: string;
-      title: string;
-      note: string;
-      image: string;
-      tag: string;
-      travelTimeToNext: string;
-    }[]
-  >([]);
-
+  const [journal, setJournal] = useState<Journal | null>(null);
+  const current = useRef<Journal | null>(null);
+  const unsaved = useRef(false);
+  const [fatal, setFatal] = useState("");
+  const [notice, setNotice] = useState("");
+  const [saveState, setSaveState] = useState("讀取中");
+  const [conflict, setConflict] = useState(false);
+  const conflictRef = useRef(false);
+  const [tab, setTab] = useState<Tab>("行程");
+  const [day, setDay] = useState(1);
+  const [editor, setEditor] = useState<Editor | null>(null);
+  const [formError, setFormError] = useState("");
+  const [photo, setPhoto] = useState("");
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoVersion = useRef(0);
+  const [busy, setBusy] = useState("");
+  const request = useRef<AbortController | null>(null);
+  const dragId = useRef<number | null>(null);
+  const importInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    setTimeout(() => {
-      const savedDays = localStorage.getItem("days");
-      const savedSchedules = localStorage.getItem("schedules");
-      const savedTripTitle = localStorage.getItem("tripTitle");
-      const savedDarkMode = localStorage.getItem("isDarkMode");
-
-      if (savedDays) {
-        setDays(JSON.parse(savedDays));
+    const timer = setTimeout(() => {
+      try {
+        const data = readJournal(localStorage);
+        current.current = data;
+        setJournal(data);
+        setSaveState("已讀取本機資料");
+      } catch (e) {
+        setFatal(message(e));
       }
-
-      if (savedSchedules) {
-        setSchedules(JSON.parse(savedSchedules));
-      }
-
-      if (savedTripTitle) {
-        setTripTitle(savedTripTitle);
-      }
-
-      if (savedDarkMode) {
-        setIsDarkMode(JSON.parse(savedDarkMode));
-      }
-
-      setIsLoaded(true);
     }, 0);
+    const onStorage = (e: StorageEvent) => {
+      if (
+        e.storageArea === localStorage &&
+        (e.key === STORAGE_KEY || e.key === null)
+      ) {
+        conflictRef.current = true;
+        setConflict(true);
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (unsaved.current) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      clearTimeout(timer);
+      request.current?.abort();
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
   }, []);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-
-    localStorage.setItem("days", JSON.stringify(days));
-  }, [days, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-
-    localStorage.setItem("schedules", JSON.stringify(schedules));
-  }, [schedules, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-
-    localStorage.setItem("tripTitle", tripTitle);
-  }, [tripTitle, isLoaded]);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-
-    localStorage.setItem("isDarkMode", JSON.stringify(isDarkMode));
-  }, [isDarkMode, isLoaded]);
-  
-  useEffect(() => {
-    const currentDay = dayRefs.current[selectedDay - 1];
-
-    if (currentDay) {
-      currentDay.scrollIntoView({
-        behavior: "smooth",
-        inline: "center",
-        block: "nearest",
-      });
+  function commit(next: Journal) {
+    if (conflictRef.current)
+      throw new Error("另一個分頁已更新資料。請先備份目前畫面，再重新載入。");
+    const checked = parseBackup(next);
+    current.current = checked;
+    setJournal(checked);
+    try {
+      writeJournal(localStorage, checked);
+      unsaved.current = false;
+      setSaveState("已儲存於此瀏覽器");
+    } catch {
+      unsaved.current = true;
+      setSaveState("尚未儲存：空間不足或瀏覽器禁止儲存。請立即匯出備份。");
     }
-  }, [selectedDay]);
-
-  useEffect(() => {
-    setTimeout(() => {
-      const currentDaySchedules = schedules
-        .filter((item) => item.day === selectedDay)
-        .sort((a, b) => a.endTime.localeCompare(b.endTime));
-
-      const lastSchedule = currentDaySchedules[currentDaySchedules.length - 1];
-
-      if (lastSchedule) {
-        setNewStartTime(lastSchedule.endTime);
-
-        const [hour, minute] = lastSchedule.endTime.split(":").map(Number);
-
-        const endDate = new Date();
-        endDate.setHours(hour + 1);
-        endDate.setMinutes(minute);
-
-        const endHour = String(endDate.getHours()).padStart(2, "0");
-        const endMinute = String(endDate.getMinutes()).padStart(2, "0");
-
-        setNewEndTime(`${endHour}:${endMinute}`);
-      } else {
-        setNewStartTime("08:00");
-        setNewEndTime("09:00");
-      }
-    }, 0);
-  }, [selectedDay, schedules]);
-
-
-
-
-  const [isLoadingWeather, setIsLoadingWeather] = useState(false);
-  const dayRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const dateInputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const timelineEndRef = useRef<HTMLDivElement | null>(null);
-  const [draggingScheduleId, setDraggingScheduleId] = useState<number | null>(null);
-  const [openScheduleIds, setOpenScheduleIds] = useState<number[]>([]);
-
-  function toggleScheduleOpen(id: number) {
-    setOpenScheduleIds((prev) =>
-      prev.includes(id)
-        ? prev.filter((item) => item !== id)
-        : [...prev, id]
-    );
   }
-
-
-
-  function isTimeOverlapping(
-    day: number,
-    startTime: string,
-    endTime: string,
-    excludeId?: number
-  ) {
-    return schedules.some((item) => {
-      if (item.day !== day) return false;
-      if (excludeId && item.id === excludeId) return false;
-
-      return startTime < item.endTime && endTime > item.startTime;
+  function change(id: number, update: (trip: Trip) => Trip) {
+    const data = current.current;
+    if (!data) return;
+    commit({
+      ...data,
+      trips: data.trips.map((t) => (t.id === id ? update(t) : t)),
     });
   }
-  function addSchedule() {
-    if (!newStartTime || !newEndTime || !newTitle) {
-      alert("請輸入開始時間、結束時間與行程名稱");
-      return;
-    }
-
-    if (newEndTime <= newStartTime) {
-      alert("結束時間一定要晚於開始時間");
-      return;
-    }
-
-    if (isTimeOverlapping(selectedDay, newStartTime, newEndTime)) {
-      alert("這個時間跟其他行程重疊了");
-      return;
-    }
-
-    setSchedules([
-      ...schedules,
-      {
-        id: Date.now(),
-        day: selectedDay,
-        startTime: newStartTime,
-        endTime: newEndTime,
-        title: newTitle,
-        note: newNote,
-        image: newImage,
-        tag: newTag,
-        travelTimeToNext: "",
-      },
-    ]);
-
-    setNewStartTime(newEndTime);
-    setNewEndTime("");
-    setNewTitle("");
-    setNewNote("");
-    setNewImage("");
-    setNewTag("景點");
-    setTimeout(() => {
-      timelineEndRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "end",
-      });
-    }, 100);    
-  }
-
-  function deleteSchedule(id: number) {
-    setSchedules(schedules.filter((item) => item.id !== id));
-  }
-
-  function getWeatherIcon(code: number) {
-    if (code === 0) return "☀️";
-    if ([1, 2, 3].includes(code)) return "⛅";
-    if ([45, 48].includes(code)) return "🌫️";
-    if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return "🌧️";
-    if ([71, 73, 75, 77, 85, 86].includes(code)) return "❄️";
-    if ([95, 96, 99].includes(code)) return "⛈️";
-    return "☁️";
-  }
-
-  async function fetchTaiwanWeather(targetDays = days) {
-    if (!weatherLocation.trim()) {
-      alert("請先輸入台灣地區名稱");
-      return;
-    }
-
-    setIsLoadingWeather(true);
-
+  function safely(action: () => void) {
     try {
-      const geoRes = await fetch(
-        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
-          weatherLocation
-        )}&count=5&language=zh&format=json&countryCode=TW`
-      );
-
-      const geoData = await geoRes.json();
-      const location = geoData.results?.find(
-        (item: { country_code?: string }) => item.country_code === "TW"
-      ) || geoData.results?.[0];
-
-      if (!location) {
-        alert("找不到這個台灣地區，請改輸入英文，例如 Hsinchu、Taipei、Taichung、Kaohsiung");
+      action();
+    } catch (e) {
+      setNotice(message(e));
+    }
+  }
+  function stopRequest() {
+    request.current?.abort();
+    request.current = null;
+    setBusy("");
+  }
+  function openEditor(value: Editor) {
+    stopRequest();
+    photoVersion.current++;
+    setPhotoBusy(false);
+    setFormError("");
+    setPhoto(value.kind === "schedule" ? value.item?.image || "" : "");
+    setEditor(value);
+  }
+  function closeEditor() {
+    photoVersion.current++;
+    setPhotoBusy(false);
+    setEditor(null);
+    setFormError("");
+  }
+  async function importBackup(file?: File) {
+    if (!file) return;
+    try {
+      if (file.size > 30000000) throw new Error("備份檔不可超過 30 MB。");
+      const data = parseBackup(JSON.parse(await file.text()));
+      if (
+        !window.confirm(
+          `匯入 ${data.trips.length} 趟旅行，並取代目前全部旅行？建議先匯出現有備份。`,
+        )
+      )
         return;
-      }
-
-      const today = new Date();
-
-      const weatherRes = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}&daily=weather_code,temperature_2m_max&forecast_days=16&timezone=Asia%2FTaipei`
-      );
-
-      const weatherData = await weatherRes.json();
-
-      setDays(
-        targetDays.map((day) => {
-          const targetDate = new Date(day.date);
-
-          const diffDays = Math.floor(
-            (targetDate.getTime() - today.getTime()) /
-            (1000 * 60 * 60 * 24)
-          );
-
-          const weatherIndex = weatherData.daily.time.findIndex(
-            (date: string) => date === day.date
-          );
-
-          if (diffDays > 15 || weatherIndex === -1) {
-            return {
-              ...day,
-              weather: "🕒",
-              temperature: "尚無預報",
-            };
-          }
-
-          return {
-            ...day,
-            weather: getWeatherIcon(weatherData.daily.weather_code[weatherIndex]),
-            temperature: `${Math.round(
-              weatherData.daily.temperature_2m_max[weatherIndex]
-            )}°`,
-          };
-        })
-      );
-    } catch (error) {
-      alert("天氣抓取失敗，請稍後再試");
-    } finally {
-      setIsLoadingWeather(false);
+      commit(data);
+      setFatal("");
+      setDay(1);
+      closeEditor();
+      stopRequest();
+      setNotice("備份已匯入。請留意上方儲存狀態。");
+    } catch (e) {
+      setNotice("無法匯入：" + message(e));
     }
   }
-
-  async function optimizeTodayRoute() {
-    const daySchedules = schedules.filter(
-      (item) => item.day === selectedDay
+  function rawBackup() {
+    safely(() =>
+      download(
+        "travel-journal-recovery.json",
+        Object.fromEntries(
+          [
+            STORAGE_KEY,
+            "trips",
+            "activeTripId",
+            "days",
+            "schedules",
+            "tripTitle",
+            "isDarkMode",
+          ].map((key) => [key, localStorage.getItem(key)]),
+        ),
+      ),
     );
-
-    if (daySchedules.length < 3) {
-      alert("至少需要三個行程才能最佳化");
-      return;
-    }
-
-    try {
-      const locations = await Promise.all(
-        daySchedules.map(async (item) => {
-          const response = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=tw&q=${encodeURIComponent(
-              item.title
-            )}`
-          );
-
-          const data = await response.json();
-
-          if (!data[0]) {
-            throw new Error(`${item.title} 找不到位置`);
-          }
-
-          return {
-            ...item,
-            lat: Number(data[0].lat),
-            lon: Number(data[0].lon),
-          };
-        })
-      );
-
-      const sortedByTime = [...daySchedules].sort((a, b) =>
-        a.startTime.localeCompare(b.startTime)
-      );
-
-      const route = [locations[0]];
-      const remaining = locations.slice(1);
-
-      while (remaining.length > 0) {
-        const current = route[route.length - 1];
-
-        let nearestIndex = 0;
-        let nearestDistance = Infinity;
-
-        remaining.forEach((place, index) => {
-          const distance =
-            Math.pow(current.lat - place.lat, 2) +
-            Math.pow(current.lon - place.lon, 2);
-
-          if (distance < nearestDistance) {
-            nearestDistance = distance;
-            nearestIndex = index;
-          }
-        });
-
-        route.push(remaining[nearestIndex]);
-        remaining.splice(nearestIndex, 1);
-      }
-
-      const updatedDaySchedules = route.map((item, index) => ({
-        ...item,
-        startTime: sortedByTime[index].startTime,
-        endTime: sortedByTime[index].endTime,
-      }));
-
-      const updatedSchedules = schedules.map((schedule) => {
-        const matched = updatedDaySchedules.find(
-          (item) => item.id === schedule.id
-        );
-
-        return matched || schedule;
-      });
-
-      setSchedules(updatedSchedules);
-      alert("已完成最佳路線排序 😎");
-    } catch (error) {
-      alert("最佳化失敗，請確認行程名稱是台灣可搜尋的地點");
-    }
   }
-
-  function openTodayRoute() {
-    const daySchedules = schedules
-      .filter((item) => item.day === selectedDay)
-      .sort((a, b) => a.startTime.localeCompare(b.startTime));
-
-    if (daySchedules.length < 2) {
-      alert("至少要有兩個行程才能產生路線");
-      return;
-    }
-
-    const origin = daySchedules[0].title;
-    const destination = daySchedules[daySchedules.length - 1].title;
-    const waypoints = daySchedules
-      .slice(1, -1)
-      .map((item) => item.title)
-      .join("|");
-
-    const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(
-      origin
-    )}&destination=${encodeURIComponent(destination)}${
-      waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : ""
-    }&travelmode=${travelMode}`;
-
-    window.open(url, "_blank");
-  }
-
-  function swapScheduleTime(dragId: number, dropId: number) {
-    if (dragId === dropId) return;
-
-    const dragItem = schedules.find((item) => item.id === dragId);
-    const dropItem = schedules.find((item) => item.id === dropId);
-
-    if (!dragItem || !dropItem) return;
-
-    const updatedSchedules = schedules.map((item) => {
-      if (item.id === dragItem.id) {
-        return {
-          ...item,
-          startTime: dropItem.startTime,
-          endTime: dropItem.endTime,
-        };
-      }
-
-      if (item.id === dropItem.id) {
-        return {
-          ...item,
-          startTime: dragItem.startTime,
-          endTime: dragItem.endTime,
-        };
-      }
-
-      return item;
-    });
-
-    setSchedules(updatedSchedules);
-    setDraggingScheduleId(null);
-  }
-
-  function addDays(dateString: string, daysToAdd: number) {
-    const date = new Date(dateString);
-    date.setDate(date.getDate() + daysToAdd);
-    return date.toISOString().split("T")[0];
-  }
-
-  function addDay() {
-    const nextDay = days.length + 1;
-    const firstDate = days[0].date;
-
-    const updatedDays = [
-      ...days,
-      {
-        day: nextDay,
-        date: addDays(firstDate, days.length),
-        weather: "",
-        temperature: "",
-      },
-    ];
-
-    setDays(updatedDays);
-    setSelectedDay(nextDay);
-
-    fetchTaiwanWeather(updatedDays);
-  }
-  function deleteDay(dayNumber: number) {
-    const remainingDays = days.filter((day) => day.day !== dayNumber);
-    const firstDate = remainingDays[0]?.date || days[0].date;
-
-    const updatedDays = remainingDays.map((day, index) => ({
-      ...day,
-      day: index + 1,
-      date: addDays(firstDate, index),
-    }));
-
-    const updatedSchedules = schedules
-      .filter((item) => item.day !== dayNumber)
-      .map((item) => {
-        if (item.day > dayNumber) {
-          return {
-            ...item,
-            day: item.day - 1,
-          };
-        }
-
-        return item;
-      });
-
-    setDays(updatedDays);
-    setSchedules(updatedSchedules);
-
-    if (selectedDay > updatedDays.length) {
-      setSelectedDay(updatedDays.length);
-    } else {
-      setSelectedDay(selectedDay);
-    }
-  }
-  return (
-    <main className={`min-h-screen p-4 pb-28 ${isDarkMode ? "bg-gray-950" : "bg-[#f5f7fb]"}`}>
-      {/* Header */}
-      <div className={`relative rounded-3xl p-5 shadow-sm ${isDarkMode ? "bg-gray-900" : "bg-white"}`}>
-        <input
-          value={tripTitle}
-          onChange={(e) => setTripTitle(e.target.value)}
-          className={`text-2xl font-bold bg-transparent outline-none w-full ${isDarkMode ? "text-white" : "text-black"}`}
-        />
-
-        <div className={`mt-1 flex items-center gap-2 ${isDarkMode ? "text-gray-400" : "text-gray-500"}`}>
-          <span>{tripDate}</span>
-
-          <span className="text-gray-300">|</span>
-
-          <span className="text-blue-500 font-medium">
-            {weatherLocation} 天氣
-          </span>
-        </div>
-
-        <div className="flex gap-2 mt-4">
-          <input
-            value={weatherLocation}
-            onChange={(e) => setWeatherLocation(e.target.value)}
-            placeholder="輸入台灣地區，例如 新竹"
-            className={`flex-1 p-3 rounded-2xl border ${isDarkMode ? "bg-gray-800 text-white border-gray-700" : "text-black"}`}
-          />
-
-          <button
-            onClick={() => fetchTaiwanWeather()}
-            disabled={isLoadingWeather}
-            className="bg-blue-500 text-white px-4 rounded-2xl font-bold"
-          >
-            {isLoadingWeather ? "抓取中" : "抓天氣"}
-          </button>
-        </div>
-
-        <div className="absolute top-4 right-4">
-          <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            className={`px-4 py-2 rounded-full text-sm font-bold shadow-sm ${
-              isDarkMode
-                ? "bg-white text-black"
-                : "bg-black text-white"
-            }`}
-          >
-            {isDarkMode ? "☀️ 淺色" : "🌙 深色"}
-          </button>
-        </div>
-
-        {/* Day Tabs */}
-        <div className="flex gap-3 mt-5 overflow-x-auto overflow-y-visible pb-3">
-          {days.map((item) => (
-            <div
-              className="relative"
-              key={item.day}
-              ref={(el) => {
-                dayRefs.current[item.day - 1] = el;
-              }}
-            >
-              <div
-                onClick={() => setSelectedDay(item.day)}
-                className={`px-4 py-3 rounded-3xl min-w-[100px] shrink-0 cursor-pointer transition-all ${
-                  selectedDay === item.day
-                    ? "bg-blue-500 text-white"
-                    : "bg-gray-200 text-black"
-                }`}
-              >
-                <div className="relative w-full h-[86px]">
-                  <div className="absolute top-0 left-0 font-bold text-xs">
-                    Day {item.day}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dateInputRefs.current[item.day - 1]?.showPicker();
-                    }}
-                    className="absolute top-[28px] left-1/2 -translate-x-1/2 text-lg font-bold cursor-pointer"
-                  >
-                    {`${Number(item.date.slice(5, 7))}/${Number(item.date.slice(8, 10))}`}
-                  </button>
-
-                  <div className="absolute top-[58px] left-1/2 -translate-x-1/2 flex items-center gap-1">
-                    <span className="text-lg">
-                      {item.weather || "☀️"}
-                    </span>
-
-                    <span className="text-sm font-medium">
-                      {item.temperature || "--"}
-                    </span>
-                  </div>
-                </div>
-                <input
-                  ref={(el) => {
-                    dateInputRefs.current[item.day - 1] = el;
-                  }}
-                  type="date"
-                  value={item.date}
-                  onChange={(e) => {
-                    if (!e.target.value) return;
-
-                    const updatedDays = days.map((day) => {
-                      const date = new Date(e.target.value);
-                      date.setDate(date.getDate() + (day.day - item.day));
-
-                      return {
-                        ...day,
-                        date: date.toISOString().split("T")[0],
-                      };
-                    });
-
-                    setDays(updatedDays);
-                    fetchTaiwanWeather(updatedDays);
-                  }}
-                  className="absolute opacity-0 pointer-events-none"
-                />
-              </div>
-
-              {days.length > 1 && (
-                <button
-                  onClick={() => deleteDay(item.day)}
-                  className="absolute top-1 right-1 bg-red-400 text-white w-5 h-5 rounded-full text-xs"
-                >
-                  ×
-                </button>
-              )}
-            </div>
-          ))}
-
-          <button
-            onClick={addDay}
-            className="px-5 py-3 rounded-2xl min-w-[90px] bg-black text-white"
-          >
-            ＋ Day
-          </button>
-        </div>
-      </div>
-
-  {activeTab === "行程" && (
-    <>
-      {/* Add Schedule Form */}
-      <div className="bg-white rounded-3xl p-5 shadow-sm mt-6">
-        <h2 className="text-lg font-bold text-black mb-4">
-          新增 Day {selectedDay} 行程
-        </h2>
-
-        <div className="flex gap-1 mb-3">
-          <div className="w-[160px]">
-            <p className="text-sm text-gray-400 mb-2">
-              開始時間
-            </p>
-
-            <input
-              type="time"
-              value={newStartTime}
-              onChange={(e) => setNewStartTime(e.target.value)}
-              className="flex-1 p-3 rounded-2xl border text-black"
-            />
-          </div>
-
-          <div className="w-[160px]">
-            <p className="text-sm text-gray-400 mb-2">
-              結束時間
-            </p>
-
-            <input
-              type="time"
-              value={newEndTime}
-              onChange={(e) => setNewEndTime(e.target.value)}
-              className="flex-1 p-3 rounded-2xl border text-black"
-            />
-          </div>
-        </div>
-
-        <input
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.target.value)}
-          placeholder="行程名稱，例如 大阪城 🏯"
-          className="w-full p-3 rounded-2xl border mb-3 text-black"
-        />
-
-        <select
-          value={newTag}
-          onChange={(e) => setNewTag(e.target.value)}
-          className="w-full p-3 rounded-2xl border mb-3 text-black"
-        >
-          <option value="景點">🏯 景點</option>
-          <option value="美食">🍖 美食</option>
-          <option value="交通">🚆 交通</option>
-          <option value="飯店">🏨 飯店</option>
-          <option value="購物">🛍️ 購物</option>
-          <option value="其他">📍 其他</option>
-        </select>
-
-        <input
-          value={newNote}
-          onChange={(e) => setNewNote(e.target.value)}
-          placeholder="備註，例如 門票 ¥600"
-          className="w-full p-3 rounded-2xl border mb-3 text-black"
-        />
-        <input
-          type="file"
-          accept="image/*"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-
-            if (file) {
-              const reader = new FileReader();
-
-              reader.onloadend = () => {
-                setNewImage(reader.result as string);
-              };
-
-              reader.readAsDataURL(file);
-            }
-          }}
-          className="w-full p-3 rounded-2xl border mb-4 text-black"
-        />
-
-        <button
-          onClick={addSchedule}
-          className="w-full bg-blue-500 text-white py-3 rounded-2xl font-bold"
-        >
-          ＋ 新增行程
-        </button>
-      </div>
-
-      {/* Timeline */}
-      <div className="mt-8 relative border-l-4 border-blue-400 ml-5 pl-8 space-y-8">
-
-        {schedules.filter((item) => item.day === selectedDay).length === 0 && (
-          <div className="bg-white rounded-3xl p-5 text-gray-400 text-center">
-            這一天還沒有行程
-          </div>
-        )}
-
-        {schedules
-          .filter((item) => item.day === selectedDay)
-          .sort((a, b) =>
-            a.startTime.localeCompare(b.startTime)
-          )
-          .map((item, index, daySchedules) => (
-            <div
-              className={`relative cursor-grab active:cursor-grabbing ${
-                draggingScheduleId === item.id ? "opacity-50" : ""
-              }`}
-              key={item.id}
-              draggable
-              onDragStart={() => setDraggingScheduleId(item.id)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => {
-                if (draggingScheduleId !== null) {
-                  swapScheduleTime(draggingScheduleId, item.id);
-                }
-              }}
-              onDragEnd={() => setDraggingScheduleId(null)}
-            >
-              <select
-                value={item.tag || "景點"}
-                onChange={(e) => {
-                  setSchedules(
-                    schedules.map((schedule) =>
-                      schedule.id === item.id
-                        ? { ...schedule, tag: e.target.value }
-                        : schedule
-                    )
-                  );
-                }}
-                className="absolute -left-[52px] top-1/2 -translate-y-1/2 text-3xl bg-transparent outline-none cursor-pointer appearance-none w-[40px] text-center"
-              >
-                <option value="景點">🏯</option>
-                <option value="美食">🍖</option>
-                <option value="交通">🚆</option>
-                <option value="飯店">🏨</option>
-                <option value="購物">🛍️</option>
-                <option value="其他">📍</option>
-              </select>
-
-              <div className="bg-white rounded-3xl p-5 shadow-sm">
-                <div
-                  onClick={() => toggleScheduleOpen(item.id)}
-                  className="w-full text-left flex justify-between items-center mb-3"
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      value={item.title}
-                      onChange={(e) => {
-                        setSchedules(
-                          schedules.map((schedule) =>
-                            schedule.id === item.id
-                              ? { ...schedule, title: e.target.value }
-                              : schedule
-                          )
-                        );
-                      }}
-                      className="text-xl font-bold text-black bg-transparent outline-none min-w-[80px]"
-                    />
-
-                    {!openScheduleIds.includes(item.id) && (
-                      <span className="text-sm text-gray-400 whitespace-nowrap">
-                        {item.startTime} - {item.endTime}
-                      </span>
-                    )}
-
-                    <span className="text-xs bg-blue-100 text-blue-500 px-2 py-1 rounded-full whitespace-nowrap">
-                      {item.tag || "景點"}
-                    </span>
-                  </div>
-
-                  <span className="text-gray-400">
-                    {openScheduleIds.includes(item.id) ? "▲" : "▼"}
-                  </span>
-                </div>
-
-                {openScheduleIds.includes(item.id) && (
-                  <>
-                  <div className="flex gap-2 items-center text-sm text-gray-400 flex-wrap">
-                  <input
-                    type="time"
-                    value={item.startTime}
-                    onChange={(e) => {
-                      if (e.target.value >= item.endTime) {
-                        alert("開始時間一定要早於結束時間");
-                        return;
-                      }
-
-                      if (isTimeOverlapping(item.day, e.target.value, item.endTime, item.id)) {
-                        alert("這個時間跟其他行程重疊了");
-                        return;
-                      }                     
-                      const updatedSchedules = schedules.map((schedule) =>
-                        schedule.id === item.id
-                          ? { ...schedule, startTime: e.target.value }
-                          : schedule
-                      );
-
-                      updatedSchedules.sort((a, b) =>
-                        a.startTime.localeCompare(b.startTime)
-                      );
-
-                      setSchedules(updatedSchedules);
-                    }}
-                    className="bg-transparent outline-none"
-                  />
-
-                  <span>-</span>
-
-                  <input
-                    type="time"
-                    value={item.endTime}
-                    onChange={(e) => {
-                      if (e.target.value <= item.startTime) {
-                        alert("結束時間一定要晚於開始時間");
-                        return;
-                      }
-
-                      if (isTimeOverlapping(item.day, item.startTime, e.target.value, item.id)) {
-                        alert("這個時間跟其他行程重疊了");
-                        return;
-                      }
-
-                      const updatedSchedules = schedules.map((schedule) =>
-                        schedule.id === item.id
-                          ? { ...schedule, endTime: e.target.value }
-                          : schedule
-                      );
-
-                      updatedSchedules.sort((a, b) =>
-                        a.startTime.localeCompare(b.startTime)
-                      );
-
-                      setSchedules(updatedSchedules);
-                    }}
-                    className="bg-transparent outline-none"
-                  />
-                  <span className="text-blue-500 text-xs">
-                    {(() => {
-                      const [startHour, startMinute] = item.startTime.split(":").map(Number);
-                      const [endHour, endMinute] = item.endTime.split(":").map(Number);
-
-                      const start = startHour * 60 + startMinute;
-                      const end = endHour * 60 + endMinute;
-
-                      const diff = end - start;
-
-                      if (diff <= 0) {
-                        return "時間錯誤";
-                      }
-
-                      const hours = Math.floor(diff / 60);
-                      const minutes = diff % 60;
-
-                      return `${hours} 小時 ${minutes} 分`;
-                    })()}
-                  </span>
-                </div>
-
-
-
-                <input
-                  value={item.note}
-                  onChange={(e) => {
-                    setSchedules(
-                      schedules.map((schedule) =>
-                        schedule.id === item.id
-                          ? { ...schedule, note: e.target.value }
-                          : schedule
+  const importControl = (
+    <input
+      ref={importInput}
+      aria-label="匯入旅行備份"
+      type="file"
+      accept=".json,application/json"
+      hidden
+      onChange={(e) => {
+        void importBackup(e.target.files?.[0]);
+        e.target.value = "";
+      }}
+    />
+  );
+  if (!journal)
+    return (
+      <main className="loading">
+        <div className="brand-mark">旅</div>
+        <h1>旅行手記</h1>
+        {fatal ? (
+          <>
+            <p role="alert">無法安全讀取原有資料：{fatal}</p>
+            <p>原始資料沒有被覆蓋。請先下載救援檔，再匯入有效備份。</p>
+            <div className="actions">
+              <button onClick={rawBackup}>下載原始救援檔</button>
+              <button onClick={() => importInput.current?.click()}>
+                匯入備份
+              </button>
+              <button
+                className="danger"
+                onClick={() =>
+                  safely(() => {
+                    if (
+                      confirm(
+                        "確定建立新資料？這會取代新版儲存內容。請先下載救援檔。",
                       )
-                    );
-                  }}
-                  placeholder="備註"
-                  className="text-gray-500 mt-3 bg-transparent outline-none w-full"
-                />
-
-                <div className="flex gap-3 mt-5">
-                  <button
-                    onClick={() => {
-                      window.open(
-                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                          item.title
-                        )}`,
-                        "_blank"
-                      );
-                    }}
-                    className="bg-black text-white px-4 py-2 rounded-full"
-                  >
-                    Google Maps
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      const daySchedules = schedules
-                        .filter((schedule) => schedule.day === selectedDay)
-                        .sort((a, b) =>
-                          a.startTime.localeCompare(b.startTime)
-                        );
-
-                      const currentIndex = daySchedules.findIndex(
-                        (schedule) => schedule.id === item.id
-                      );
-
-                      if (currentIndex <= 0) return;
-
-                      const currentItem = daySchedules[currentIndex];
-                      const previousItem = daySchedules[currentIndex - 1];
-
-                      const updatedSchedules = schedules.map((schedule) => {
-                        if (schedule.id === currentItem.id) {
-                          return {
-                            ...schedule,
-                            startTime: previousItem.startTime,
-                            endTime: previousItem.endTime,
-                          };
-                        }
-
-                        if (schedule.id === previousItem.id) {
-                          return {
-                            ...schedule,
-                            startTime: currentItem.startTime,
-                            endTime: currentItem.endTime,
-                          };
-                        }
-
-                        return schedule;
+                    ) {
+                      const t = createTrip();
+                      commit({
+                        version: 2,
+                        trips: [t],
+                        activeTripId: t.id,
+                        isDarkMode: false,
                       });
-
-                      setSchedules(updatedSchedules);
-                    }}
-                    className="bg-gray-100 text-black px-4 py-2 rounded-full"
-                  >
-                    ↑
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      const daySchedules = schedules
-                        .filter((schedule) => schedule.day === selectedDay)
-                        .sort((a, b) =>
-                          a.startTime.localeCompare(b.startTime)
-                        );
-
-                      const currentIndex = daySchedules.findIndex(
-                        (schedule) => schedule.id === item.id
-                      );
-
-                      if (currentIndex >= daySchedules.length - 1) return;
-
-                      const currentItem = daySchedules[currentIndex];
-                      const nextItem = daySchedules[currentIndex + 1];
-
-                      const updatedSchedules = schedules.map((schedule) => {
-                        if (schedule.id === currentItem.id) {
-                          return {
-                            ...schedule,
-                            startTime: nextItem.startTime,
-                            endTime: nextItem.endTime,
-                          };
-                        }
-
-                        if (schedule.id === nextItem.id) {
-                          return {
-                            ...schedule,
-                            startTime: currentItem.startTime,
-                            endTime: currentItem.endTime,
-                          };
-                        }
-
-                        return schedule;
-                      });
-
-                      setSchedules(updatedSchedules);
-                    }}
-                    className="bg-gray-100 text-black px-4 py-2 rounded-full"
-                  >
-                    ↓
-                  </button>
-
-                  <button
-                    onClick={() => deleteSchedule(item.id)}
-                    className="bg-red-100 text-red-500 px-4 py-2 rounded-full"
-                  >
-                    刪除
-                  </button>
-                </div>
-
-                {item.image && (
-                  <img
-                    src={item.image}
-                    alt={item.title}
-                    className="w-full h-48 object-cover rounded-2xl mt-5"
-                  />
-                )}
-
-                {index < daySchedules.length - 1 && (
-                  <div className="mt-5 bg-blue-50 rounded-2xl p-3">
-                    <div className="text-sm text-blue-500 font-bold mb-2">
-                      到下一站移動時間
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <input
-                        value={item.travelTimeToNext || ""}
-                        onChange={(e) => {
-                          setSchedules(
-                            schedules.map((schedule) =>
-                              schedule.id === item.id
-                                ? { ...schedule, travelTimeToNext: e.target.value }
-                                : schedule
-                            )
-                          );
-                        }}
-                        placeholder="例如 18"
-                        className="w-[90px] p-2 rounded-xl border text-black"
-                      />
-
-                      <span className="text-gray-500 text-sm">分鐘</span>
-                    </div>
-                  </div>
-                )}
-
-                    </>
-                  )}
-                </div>
-
-                                {index < daySchedules.length - 1 && (
-                                  <div className="text-center text-sm text-blue-500 font-bold">
-                                    ↓ 移動 {item.travelTimeToNext || "?"} 分鐘
-                                  </div>
-                                )}
-                            </div>
-                          ))}
-                      <div ref={timelineEndRef}></div>
-      </div>
-
-        </>
-      )}
-
-      {activeTab === "地圖" && (
-        <div className="bg-white rounded-3xl p-5 shadow-sm mt-6">
-          <h2 className="text-lg font-bold text-black mb-4">
-            Day {selectedDay} 地圖清單
-          </h2>
-
-          <div className="flex gap-3 mb-5">
-            <select
-              value={travelMode}
-              onChange={(e) => setTravelMode(e.target.value)}
-              className="w-[180px] p-2 rounded-xl border text-black text-sm"
-            >
-              <option value="driving">🚗 開車</option>
-              <option value="walking">🚶 走路</option>
-              <option value="transit">🚆 大眾運輸</option>
-              <option value="bicycling">🚲 腳踏車</option>
-            </select>
-
-            <div className="flex gap-3">
-              <button
-                onClick={openTodayRoute}
-                className="w-[180px] bg-blue-500 text-white py-2 rounded-xl font-bold text-sm"
+                      setFatal("");
+                    }
+                  })
+                }
               >
-                開啟今日路線
-              </button>
-
-              <button
-                onClick={optimizeTodayRoute}
-                className="w-[180px] bg-green-500 text-white py-2 rounded-xl font-bold text-sm"
-              >
-                最佳化路線
+                建立新資料
               </button>
             </div>
+          </>
+        ) : (
+          <p>正在打開你的旅行手記…</p>
+        )}
+        {notice && <p role="alert">{notice}</p>}
+        {importControl}
+      </main>
+    );
+  const trip = journal.trips.find((t) => t.id === journal.activeTripId)!;
+  const selected = trip.days.find((d) => d.day === day) || trip.days[0];
+  const daily = trip.schedules
+    .filter((s) => s.day === selected.day)
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const summary = budgetSummary(trip);
+  const money = (value: number) =>
+    new Intl.NumberFormat("zh-TW", {
+      style: "currency",
+      currency: trip.currency,
+      maximumFractionDigits: 2,
+    }).format(value);
+  const formatDate = (date: string) =>
+    new Date(date + "T12:00:00").toLocaleDateString("zh-TW", {
+      month: "short",
+      day: "numeric",
+      weekday: "short",
+    });
+  const addSchedule = () => openEditor({ kind: "schedule" });
+  function move(id: number, direction: number) {
+    const ids = daily.map((s) => s.id);
+    const i = ids.indexOf(id),
+      j = i + direction;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    safely(() =>
+      change(trip.id, (t) => ({
+        ...t,
+        schedules: reorderDay(t.schedules, selected.day, ids),
+      })),
+    );
+  }
+  function removeSchedule(item: Schedule) {
+    if (confirm(`刪除「${item.title}」？照片與備註也會一併刪除。`))
+      safely(() =>
+        change(trip.id, (t) => ({
+          ...t,
+          schedules: t.schedules.filter((s) => s.id !== item.id),
+        })),
+      );
+  }
+  async function weather() {
+    stopRequest();
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("更新天氣中…");
+    const snapshot = trip.days.map((d) => d.date).join();
+    try {
+      const days = await getWeather(
+        trip.weatherLocation,
+        trip.days,
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
+      const latest = current.current?.trips.find((t) => t.id === trip.id);
+      if (
+        !latest ||
+        latest.days.map((d) => d.date).join() !== snapshot ||
+        latest.weatherLocation !== trip.weatherLocation
+      )
+        return;
+      change(trip.id, (t) => ({ ...t, days }));
+      setNotice(
+        "天氣已更新。僅提供台灣地區未來約 16 天預報，其他日期顯示尚無預報。",
+      );
+    } catch (e) {
+      if (!controller.signal.aborted) setNotice(message(e));
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        setBusy("");
+      }
+    }
+  }
+  async function optimize() {
+    if (
+      !confirm(
+        "將把行程地點送至 OpenStreetMap 查詢，以第一站為起點做近距離排序。這是直線距離建議，不含路況或營業時間；完成後會再請你確認。繼續嗎？",
+      )
+    )
+      return;
+    stopRequest();
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy("查詢地點中…");
+    const snapshot = JSON.stringify(daily);
+    try {
+      const ids = await nearestOrder(daily, controller.signal, setBusy);
+      controller.signal.throwIfAborted();
+      const latest = current.current?.trips.find((t) => t.id === trip.id);
+      if (
+        !latest ||
+        JSON.stringify(
+          latest.schedules
+            .filter((s) => s.day === selected.day)
+            .sort((a, b) => a.startTime.localeCompare(b.startTime)),
+        ) !== snapshot
+      )
+        throw new Error("行程已變更，請重新排序。");
+      const names = ids
+        .map((id, i) => `${i + 1}. ${daily.find((s) => s.id === id)!.title}`)
+        .join("\n");
+      if (
+        confirm(
+          `建議順序：\n${names}\n\n套用後保留各活動時長與時段間隔，並清除原本的交通分鐘數。套用嗎？`,
+        )
+      )
+        change(trip.id, (t) => ({
+          ...t,
+          schedules: reorderDay(t.schedules, selected.day, ids),
+        }));
+    } catch (e) {
+      if (!controller.signal.aborted) setNotice(message(e));
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        setBusy("");
+      }
+    }
+  }
+  function saveForm(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!editor) return;
+    const data = new FormData(e.currentTarget);
+    const str = (key: string) => String(data.get(key) || "").trim();
+    const num = (key: string) => Number(str(key));
+    try {
+      if (!str("title")) throw new Error("名稱不能只有空白。");
+      if (editor.kind === "trip") {
+        const start = str("start"),
+          count = num("count"),
+          old = editor.item;
+        const base = old || createTrip(str("title"), start);
+        const delta = nights(base.days[0].date, start);
+        const sameDates =
+          start === base.days[0].date && count === base.days.length;
+        const days = sameDates
+          ? base.days.map((d) =>
+              str("city") === base.weatherLocation
+                ? d
+                : { ...d, weather: "", temperature: "" },
+            )
+          : makeDays(start, count);
+        if (old && old.schedules.some((s) => s.day > count))
+          throw new Error("縮短天數前，請先移除超出天數的行程。");
+        const updated = {
+          ...base,
+          title: str("title"),
+          days,
+          weatherLocation: str("city"),
+          currency: str("currency"),
+          people: num("people"),
+          budget: num("budget"),
+          note: str("note"),
+          stays: base.stays.map((s) => ({
+            ...s,
+            checkIn: addDays(s.checkIn, delta),
+            checkOut: addDays(s.checkOut, delta),
+          })),
+        };
+        const latest = current.current!;
+        commit({
+          ...latest,
+          trips: old
+            ? latest.trips.map((t) => (t.id === old.id ? updated : t))
+            : [...latest.trips, updated],
+          activeTripId: updated.id,
+        });
+        setDay(1);
+      } else if (editor.kind === "schedule") {
+        const item: Schedule = {
+          id: editor.item?.id || newId(),
+          day: num("day"),
+          title: str("title"),
+          startTime: str("startTime"),
+          endTime: str("endTime"),
+          location: str("location"),
+          tag: str("tag"),
+          cost: num("cost"),
+          note: str("note"),
+          image: photo,
+          favorite: editor.item?.favorite || false,
+          travelTimeToNext: str("transfer"),
+        };
+        change(trip.id, (t) => {
+          const error = scheduleError(t.schedules, item);
+          if (error) throw new Error(error);
+          return {
+            ...t,
+            schedules: editor.item
+              ? t.schedules.map((s) => (s.id === item.id ? item : s))
+              : [...t.schedules, item],
+          };
+        });
+        setDay(item.day);
+      } else if (editor.kind === "stay") {
+        const item: Stay = {
+          id: editor.item?.id || newId(),
+          name: str("title"),
+          address: str("address"),
+          checkIn: str("checkIn"),
+          checkOut: str("checkOut"),
+          cost: num("cost"),
+          booked: data.has("booked"),
+          note: str("note"),
+        };
+        change(trip.id, (t) => ({
+          ...t,
+          stays: editor.item
+            ? t.stays.map((s) => (s.id === item.id ? item : s))
+            : [...t.stays, item],
+        }));
+      } else {
+        const item: Expense = {
+          id: editor.item?.id || newId(),
+          title: str("title"),
+          category: str("tag"),
+          amount: num("cost"),
+        };
+        change(trip.id, (t) => ({
+          ...t,
+          expenses: editor.item
+            ? t.expenses.map((s) => (s.id === item.id ? item : s))
+            : [...t.expenses, item],
+        }));
+      }
+      closeEditor();
+    } catch (error) {
+      setFormError(message(error));
+    }
+  }
+  const scheduleCard = (s: Schedule, index: number, favoriteView = false) => (
+    <article
+      className="schedule-card"
+      key={s.id}
+      draggable={!favoriteView && !busy}
+      onDragStart={(e) => {
+        if ((e.target as HTMLElement).closest("button,a,input")) {
+          e.preventDefault();
+          return;
+        }
+        dragId.current = s.id;
+      }}
+      onDragEnd={() => {
+        dragId.current = null;
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (favoriteView || dragId.current === null || dragId.current === s.id)
+          return;
+        const ids = daily.map((x) => x.id),
+          from = ids.indexOf(dragId.current),
+          to = ids.indexOf(s.id);
+        if (from < 0) return;
+        ids.splice(to, 0, ids.splice(from, 1)[0]);
+        dragId.current = null;
+        safely(() =>
+          change(trip.id, (t) => ({
+            ...t,
+            schedules: reorderDay(t.schedules, selected.day, ids),
+          })),
+        );
+      }}
+    >
+      <div className="time-block">
+        <strong>{s.startTime}</strong>
+        <span>{s.endTime}</span>
+        {favoriteView && <small>DAY {s.day}</small>}
+      </div>
+      <div className="activity">
+        <div className="card-heading">
+          <span className="tag">{s.tag}</span>
+          <button
+            className={`icon-button heart ${s.favorite ? "active" : ""}`}
+            aria-label={s.favorite ? `取消收藏 ${s.title}` : `收藏 ${s.title}`}
+            onClick={() =>
+              safely(() =>
+                change(trip.id, (t) => ({
+                  ...t,
+                  schedules: t.schedules.map((x) =>
+                    x.id === s.id ? { ...x, favorite: !x.favorite } : x,
+                  ),
+                })),
+              )
+            }
+          >
+            {s.favorite ? "♥" : "♡"}
+          </button>
+        </div>
+        <h3>{s.title}</h3>
+        {s.location && <p className="location">⌖ {s.location}</p>}
+        {s.image && (
+          <Image
+            className="activity-photo"
+            src={s.image}
+            alt={`${s.title}的旅行照片`}
+            width={960}
+            height={560}
+            unoptimized
+          />
+        )}
+        {s.note && <p className="note">{s.note}</p>}
+        <div className="card-footer">
+          <span className="cost">{s.cost ? money(s.cost) : "未填費用"}</span>
+          <div className="actions">
+            <a
+              className="text-link"
+              href={mapUrl(s.location || s.title)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              地圖 ↗
+            </a>
+            <button
+              className="text-button"
+              onClick={() => openEditor({ kind: "schedule", item: s })}
+            >
+              編輯
+            </button>
+            {!favoriteView && (
+              <>
+                <button
+                  className="icon-button"
+                  aria-label={`向上移動 ${s.title}`}
+                  disabled={index === 0 || !!busy}
+                  onClick={() => move(s.id, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label={`向下移動 ${s.title}`}
+                  disabled={index === daily.length - 1 || !!busy}
+                  onClick={() => move(s.id, 1)}
+                >
+                  ↓
+                </button>
+              </>
+            )}
+            <button
+              className="text-button danger"
+              onClick={() => removeSchedule(s)}
+            >
+              刪除
+            </button>
           </div>
+        </div>
+        {s.travelTimeToNext && (
+          <p className="transfer">
+            ↓ 前往下一站約 {s.travelTimeToNext} 分鐘（自行估算）
+          </p>
+        )}
+      </div>
+    </article>
+  );
+  const routes: Schedule[][] = [];
+  const step = trip.travelMode === "transit" ? 1 : 4;
+  for (let i = 0; i < daily.length - 1; i += step)
+    routes.push(daily.slice(i, i + step + 1));
+  const sEdit = editor?.kind === "schedule" ? editor.item : undefined;
+  const tEdit = editor?.kind === "trip" ? editor.item : undefined;
+  const hEdit = editor?.kind === "stay" ? editor.item : undefined;
+  const eEdit = editor?.kind === "expense" ? editor.item : undefined;
+  const lastEnd = daily.at(-1)?.endTime || "09:00";
+  const defaultStart = toMinutes(lastEnd) > 1379 ? "09:00" : lastEnd;
 
-          {schedules.filter((item) => item.day === selectedDay).length === 0 && (
-            <div className="text-gray-400 text-center py-8">
-              這一天還沒有行程
+  return (
+    <div className="app" data-theme={journal.isDarkMode ? "dark" : "light"}>
+      <header className="topbar">
+        <a href="#main" className="brand">
+          <span className="brand-mark">旅</span>
+          <span>
+            旅行手記<small>TRAVEL JOURNAL</small>
+          </span>
+        </a>
+        <div className="trip-controls">
+          <label className="sr-only" htmlFor="trip-select">
+            切換旅行
+          </label>
+          <select
+            id="trip-select"
+            value={trip.id}
+            onChange={(e) =>
+              safely(() => {
+                stopRequest();
+                commit({
+                  ...current.current!,
+                  activeTripId: Number(e.target.value),
+                });
+                setDay(1);
+              })
+            }
+          >
+            {journal.trips.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.title}
+              </option>
+            ))}
+          </select>
+          <button
+            className="icon-button"
+            aria-label="新增旅行"
+            onClick={() => openEditor({ kind: "trip" })}
+          >
+            ＋
+          </button>
+          <button
+            className="icon-button"
+            aria-label={journal.isDarkMode ? "切換淺色模式" : "切換深色模式"}
+            onClick={() =>
+              safely(() =>
+                commit({
+                  ...current.current!,
+                  isDarkMode: !journal.isDarkMode,
+                }),
+              )
+            }
+          >
+            {journal.isDarkMode ? "☀" : "☾"}
+          </button>
+        </div>
+      </header>
+      <div className="shell">
+        <aside className="sidebar">
+          <span className="nav-caption">你的旅行空間</span>
+          <nav aria-label="主要導覽">
+            {(["行程", "地圖", "住宿", "預算", "收藏", "我的"] as Tab[]).map(
+              (name, i) => (
+                <button
+                  key={name}
+                  className={tab === name ? "nav-item selected" : "nav-item"}
+                  aria-current={tab === name ? "page" : undefined}
+                  onClick={() => setTab(name)}
+                >
+                  <span>{icons[i]}</span>
+                  {name}
+                </button>
+              ),
+            )}
+          </nav>
+          <div className="sidebar-tip">
+            <span>✧</span>
+            <p>
+              把想去的地方，
+              <br />
+              慢慢變成回憶。
+            </p>
+            <small>
+              資料儲存在目前瀏覽器
+              <br />
+              記得定期匯出備份
+            </small>
+          </div>
+        </aside>
+        <main id="main" className="main">
+          <div className="save-status" role="status">
+            <span
+              className={
+                saveState.startsWith("尚未") ? "status-dot error" : "status-dot"
+              }
+            />
+            {saveState}
+          </div>
+          {conflict && (
+            <div className="alert" role="alert">
+              另一個分頁已更新資料，暫停寫入以避免覆蓋。
+              <button
+                onClick={() =>
+                  download("travel-journal-unsaved.json", current.current)
+                }
+              >
+                先匯出此頁備份
+              </button>
+              <button onClick={() => location.reload()}>重新載入</button>
             </div>
           )}
-
-          <div className="space-y-4">
-            {schedules
-              .filter((item) => item.day === selectedDay)
-              .sort((a, b) => a.startTime.localeCompare(b.startTime))
-              .map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between border rounded-2xl p-4"
+          {notice && (
+            <div className="notice" role="status">
+              <span>{notice}</span>
+              <button
+                aria-label="關閉通知"
+                className="icon-button"
+                onClick={() => setNotice("")}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          <section className="hero">
+            <div>
+              <span className="eyebrow">LET’S MAKE MEMORIES</span>
+              <h1>{trip.title}</h1>
+              <p>
+                {trip.days[0].date.replaceAll("-", ".")} —{" "}
+                {trip.days.at(-1)!.date.replaceAll("-", ".")}
+                <span className="separator"> / </span>
+                {trip.days.length} 天・{trip.people} 人同行
+              </p>
+              <button
+                className="hero-edit"
+                onClick={() => openEditor({ kind: "trip", item: trip })}
+              >
+                編輯旅行資訊 ↗
+              </button>
+            </div>
+            <div className="hero-art" aria-hidden="true">
+              <div className="sun" />
+              <div className="mountain back" />
+              <div className="mountain front" />
+              <span className="airplane">✈</span>
+              <span className="art-label">YOUR NEXT CHAPTER</span>
+            </div>
+          </section>
+          <div className="stats">
+            <div>
+              <span>旅行安排</span>
+              <strong>
+                {trip.schedules.length}
+                <small> 個行程</small>
+              </strong>
+            </div>
+            <div>
+              <span>住宿計畫</span>
+              <strong>
+                {trip.stays.length}
+                <small> 筆住宿</small>
+              </strong>
+            </div>
+            <div>
+              <span>已規劃費用</span>
+              <strong>{money(summary.total)}</strong>
+            </div>
+            <div>
+              <span>{summary.remaining < 0 ? "超出預算" : "剩餘預算"}</span>
+              <strong className={summary.remaining < 0 ? "danger" : ""}>
+                {money(Math.abs(summary.remaining))}
+              </strong>
+            </div>
+          </div>
+          {(tab === "行程" || tab === "地圖") && (
+            <>
+              <div className="days-row">
+                <div className="days" role="group" aria-label="選擇日期">
+                  {trip.days.map((d) => (
+                    <button
+                      key={d.day}
+                      className={`day-chip ${selected.day === d.day ? "chosen" : ""}`}
+                      aria-pressed={selected.day === d.day}
+                      onClick={() => {
+                        stopRequest();
+                        setDay(d.day);
+                      }}
+                    >
+                      <strong>DAY {String(d.day).padStart(2, "0")}</strong>
+                      <span>{formatDate(d.date)}</span>
+                      <small>
+                        {d.weather || "○"} {d.temperature || "尚未查詢天氣"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  className="add-day"
+                  aria-label="增加一天"
+                  onClick={() =>
+                    safely(() => {
+                      stopRequest();
+                      change(trip.id, (t) => ({
+                        ...t,
+                        days: [
+                          ...t.days,
+                          {
+                            day: t.days.length + 1,
+                            date: addDays(t.days.at(-1)!.date, 1),
+                            weather: "",
+                            temperature: "",
+                          },
+                        ],
+                      }));
+                      setDay(trip.days.length + 1);
+                    })
+                  }
                 >
-                  <div>
-                    <div className="font-bold text-black">
-                      {item.tag === "景點" && "🏯 "}
-                      {item.tag === "美食" && "🍖 "}
-                      {item.tag === "交通" && "🚆 "}
-                      {item.tag === "飯店" && "🏨 "}
-                      {item.tag === "購物" && "🛍️ "}
-                      {item.tag === "其他" && "📍 "}
-                      {item.title}
-                    </div>
-
-                    <div className="text-sm text-gray-400 mt-1">
-                      {item.startTime} - {item.endTime}
-                    </div>
+                  ＋
+                </button>
+              </div>
+              <div className="day-tools">
+                <span>⌖ {trip.weatherLocation} · 台灣天氣</span>
+                <button
+                  className="text-button"
+                  disabled={!!busy}
+                  onClick={() => void weather()}
+                >
+                  更新預報
+                </button>
+                <a
+                  href="https://open-meteo.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open-Meteo ↗
+                </a>
+                <button
+                  className="text-button danger push-right"
+                  disabled={trip.days.length === 1}
+                  onClick={() => {
+                    if (
+                      !confirm(
+                        `刪除第 ${selected.day} 天與當天 ${daily.length} 個行程？其他日期不變，天數會重新編號。`,
+                      )
+                    )
+                      return;
+                    safely(() => {
+                      stopRequest();
+                      change(trip.id, (t) => ({
+                        ...t,
+                        days: t.days
+                          .filter((d) => d.day !== selected.day)
+                          .map((d, i) => ({ ...d, day: i + 1 })),
+                        schedules: t.schedules
+                          .filter((s) => s.day !== selected.day)
+                          .map((s) => ({
+                            ...s,
+                            day: s.day > selected.day ? s.day - 1 : s.day,
+                          })),
+                      }));
+                      setDay(1);
+                    });
+                  }}
+                >
+                  刪除此日
+                </button>
+              </div>
+            </>
+          )}
+          {busy && (
+            <div className="notice" role="status">
+              <span>{busy}</span>
+              <button onClick={stopRequest}>取消</button>
+            </div>
+          )}
+          {tab === "行程" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">DAILY ITINERARY</span>
+                  <h2>第 {selected.day} 天，出發吧</h2>
+                  <p>安排喜歡的節奏，為偶遇留一點空白。</p>
+                </div>
+                <button className="primary" onClick={addSchedule}>
+                  ＋ 新增行程
+                </button>
+              </div>
+              {daily.length ? (
+                <>
+                  <p className="hint">
+                    拖曳卡片或使用 ↑ ↓ 排序；保留活動時長，重新計算時間。
+                  </p>
+                  <div className="schedule-list">
+                    {daily.map((s, i) => scheduleCard(s, i))}
                   </div>
-
+                </>
+              ) : (
+                <Empty
+                  title="今天的故事，還沒開始"
+                  action={
+                    <button className="primary" onClick={addSchedule}>
+                      ＋ 加入第一個行程
+                    </button>
+                  }
+                >
+                  從一間想吃的餐廳，或一個想去的地方開始。
+                </Empty>
+              )}
+            </section>
+          )}
+          {tab === "地圖" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">EXPLORE THE WAY</span>
+                  <h2>把每一站串起來</h2>
+                  <p>依照當日行程，開啟 Google 地圖查看實際路線。</p>
+                </div>
+              </div>
+              <div className="panel">
+                <div className="actions">
+                  <label>
+                    交通方式{" "}
+                    <select
+                      aria-label="交通方式"
+                      value={trip.travelMode}
+                      onChange={(e) =>
+                        safely(() =>
+                          change(trip.id, (t) => ({
+                            ...t,
+                            travelMode: e.target.value,
+                          })),
+                        )
+                      }
+                    >
+                      <option value="driving">開車</option>
+                      <option value="walking">步行</option>
+                      <option value="transit">大眾運輸</option>
+                      <option value="bicycling">自行車</option>
+                    </select>
+                  </label>
                   <button
-                    onClick={() => {
-                      window.open(
-                        `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                          item.title
-                        )}`,
-                        "_blank"
-                      );
-                    }}
-                    className="bg-black text-white px-4 py-2 rounded-full text-sm"
+                    disabled={daily.length < 3 || daily.length > 12 || !!busy}
+                    onClick={() => void optimize()}
                   >
-                    地圖
+                    依近距離建議排序
                   </button>
                 </div>
-              ))}
-          </div>
-        </div>
-      )}
-
-      {/* Bottom Navigation */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4 flex justify-around">
-        <button
-          onClick={() => setActiveTab("行程")}
-          className={activeTab === "行程" ? "text-blue-500 font-bold" : "text-gray-400"}
-        >
-          行程
-        </button>
-
-        <button
-          onClick={() => setActiveTab("地圖")}
-          className={activeTab === "地圖" ? "text-blue-500 font-bold" : "text-gray-400"}
-        >
-          地圖
-        </button>
-
-        <button className="text-gray-400">收藏</button>
-        <button className="text-gray-400">我的</button>
+                <p className="hint">
+                  距離排序限台灣 3–12
+                  站，以第一站為起點，不代表最快路線。填寫完整地址會更準確。
+                </p>
+                {daily.length ? (
+                  <ol className="route-list">
+                    {daily.map((s) => (
+                      <li key={s.id}>
+                        <span>{s.startTime}</span>
+                        <a
+                          href={mapUrl(s.location || s.title)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {s.title} ↗
+                          <small>{s.location || "使用行程名稱搜尋"}</small>
+                        </a>
+                      </li>
+                    ))}
+                  </ol>
+                ) : (
+                  <Empty title="先加入想去的地方">
+                    新增當日行程後，就能查看路線。
+                  </Empty>
+                )}
+                <div className="actions">
+                  {routes.map((r, i) => (
+                    <a
+                      className="button primary"
+                      key={i}
+                      href={routeUrl(r, trip.travelMode)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      開啟{routes.length > 1 ? `第 ${i + 1} 段` : "當日"}路線 ↗
+                    </a>
+                  ))}
+                </div>
+                <p className="hint">
+                  為相容手機，每段最多 5 站；大眾運輸以兩站分段。地點查詢：©{" "}
+                  <a
+                    href="https://www.openstreetmap.org/copyright"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    OpenStreetMap contributors
+                  </a>
+                  。
+                </p>
+              </div>
+            </section>
+          )}
+          {tab === "住宿" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">A PLACE TO REST</span>
+                  <h2>旅行中的小小歸屬</h2>
+                  <p>入住、退房與訂房狀態，都放在這裡。</p>
+                </div>
+                <button
+                  className="primary"
+                  onClick={() => openEditor({ kind: "stay" })}
+                >
+                  ＋ 新增住宿
+                </button>
+              </div>
+              {trip.stays.length ? (
+                <div className="stay-grid">
+                  {trip.stays.map((s) => (
+                    <article className="panel stay-card" key={s.id}>
+                      <div className="card-heading">
+                        <span className="stay-icon">⌂</span>
+                        <span className={s.booked ? "tag booked" : "tag"}>
+                          {s.booked ? "已訂房" : "待預訂"}
+                        </span>
+                      </div>
+                      <h3>{s.name}</h3>
+                      <p>
+                        {s.checkIn} → {s.checkOut} ·{" "}
+                        {nights(s.checkIn, s.checkOut)} 晚
+                      </p>
+                      <p>{s.address || "尚未填寫地址"}</p>
+                      {s.note && <p className="note">{s.note}</p>}
+                      <strong>
+                        {money(s.cost)} <small>整筆住宿總額</small>
+                      </strong>
+                      <div className="actions">
+                        <a
+                          className="text-link"
+                          href={mapUrl(s.address || s.name)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          地圖 ↗
+                        </a>
+                        <button
+                          onClick={() => openEditor({ kind: "stay", item: s })}
+                        >
+                          編輯
+                        </button>
+                        <button
+                          className="danger"
+                          onClick={() => {
+                            if (confirm(`刪除住宿「${s.name}」？`))
+                              safely(() =>
+                                change(trip.id, (t) => ({
+                                  ...t,
+                                  stays: t.stays.filter((x) => x.id !== s.id),
+                                })),
+                              );
+                          }}
+                        >
+                          刪除
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <Empty
+                  title="下一站，住在哪裡？"
+                  action={
+                    <button onClick={() => openEditor({ kind: "stay" })}>
+                      新增住宿
+                    </button>
+                  }
+                >
+                  記下喜歡的旅宿，讓每天都有舒服的終點。
+                </Empty>
+              )}
+            </section>
+          )}
+          {tab === "預算" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">SPEND WITH A PLAN</span>
+                  <h2>讓預算也剛剛好</h2>
+                  <p>
+                    以 {trip.currency} 記帳，每人預估 {money(summary.perPerson)}
+                    。
+                  </p>
+                </div>
+                <button
+                  className="primary"
+                  onClick={() => openEditor({ kind: "expense" })}
+                >
+                  ＋ 其他費用
+                </button>
+              </div>
+              <div className="panel">
+                <div className="budget-heading">
+                  <strong>{money(summary.total)}</strong>
+                  <span>／總預算 {money(trip.budget)}</span>
+                  <button
+                    className="text-button"
+                    onClick={() => openEditor({ kind: "trip", item: trip })}
+                  >
+                    調整預算
+                  </button>
+                </div>
+                <div
+                  className="budget-track"
+                  role="meter"
+                  aria-label="預算使用比例"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.min(
+                    100,
+                    trip.budget
+                      ? (summary.total / trip.budget) * 100
+                      : summary.total
+                        ? 100
+                        : 0,
+                  )}
+                >
+                  <div
+                    className={summary.remaining < 0 ? "over" : ""}
+                    style={{
+                      width: `${Math.min(100, trip.budget ? (summary.total / trip.budget) * 100 : summary.total ? 100 : 0)}%`,
+                    }}
+                  />
+                </div>
+                <div className="categories">
+                  {Object.entries(summary.categories).map(([name, value]) => (
+                    <div key={name}>
+                      <span>{name}</span>
+                      <strong>{money(value)}</strong>
+                    </div>
+                  ))}
+                </div>
+                <p className="hint">
+                  包含行程費用＋住宿總額＋下方其他費用。住宿已在住宿頁記帳時，請勿在行程重複填寫。切換幣別不會自動換匯。
+                </p>
+              </div>
+              <h3 className="subheading">其他費用</h3>
+              {trip.expenses.length ? (
+                <div className="panel">
+                  {trip.expenses.map((e) => (
+                    <div className="expense-row" key={e.id}>
+                      <span className="tag">{e.category}</span>
+                      <span>{e.title}</span>
+                      <strong>{money(e.amount)}</strong>
+                      <button
+                        onClick={() => openEditor({ kind: "expense", item: e })}
+                      >
+                        編輯
+                      </button>
+                      <button
+                        className="text-button danger"
+                        onClick={() => {
+                          if (confirm(`刪除費用「${e.title}」？`))
+                            safely(() =>
+                              change(trip.id, (t) => ({
+                                ...t,
+                                expenses: t.expenses.filter(
+                                  (x) => x.id !== e.id,
+                                ),
+                              })),
+                            );
+                        }}
+                      >
+                        刪除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty title="沒有額外費用">
+                  車票、保險或伴手禮，可從「其他費用」加入。
+                </Empty>
+              )}
+            </section>
+          )}
+          {tab === "收藏" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">SAVED MOMENTS</span>
+                  <h2>那些不想錯過的地方</h2>
+                  <p>這趟旅行裡，按下愛心收藏的行程。</p>
+                </div>
+              </div>
+              {trip.schedules.some((s) => s.favorite) ? (
+                <div className="schedule-list">
+                  {trip.schedules
+                    .filter((s) => s.favorite)
+                    .map((s, i) => scheduleCard(s, i, true))}
+                </div>
+              ) : (
+                <Empty title="把喜歡的地方留下來">
+                  在行程卡片按下 ♡，就能在這裡快速找到。
+                </Empty>
+              )}
+            </section>
+          )}
+          {tab === "我的" && (
+            <section>
+              <div className="section-title">
+                <div>
+                  <span className="eyebrow">YOUR TRAVEL SPACE</span>
+                  <h2>旅行資料與設定</h2>
+                  <p>你的手記，由你保管。</p>
+                </div>
+              </div>
+              <div className="settings-grid">
+                <div className="panel">
+                  <h3>備份與還原</h3>
+                  <p>
+                    資料只存在目前瀏覽器，沒有雲端同步。清除瀏覽器資料、更換裝置或網址，可能無法看到原資料。
+                  </p>
+                  <div className="actions">
+                    <button
+                      className="primary"
+                      onClick={() =>
+                        download(
+                          `travel-journal-${localDate()}.json`,
+                          current.current,
+                        )
+                      }
+                    >
+                      匯出全部旅行
+                    </button>
+                    <button onClick={() => importInput.current?.click()}>
+                      匯入備份
+                    </button>
+                    <button
+                      onClick={() => safely(() => commit(current.current!))}
+                    >
+                      重新嘗試儲存
+                    </button>
+                  </div>
+                  <p className="hint">
+                    備份包含照片與備註，請妥善保管。匯入會取代全部旅行，先驗證再確認，不會在驗證失敗時清空資料。
+                  </p>
+                </div>
+                <div className="panel">
+                  <h3>這趟旅行</h3>
+                  <p className="note">
+                    {trip.note ||
+                      "還沒有旅行備忘，記下訂位提醒或出發前要做的事吧。"}
+                  </p>
+                  <div className="actions">
+                    <button
+                      onClick={() => openEditor({ kind: "trip", item: trip })}
+                    >
+                      編輯旅行資訊
+                    </button>
+                    <button
+                      className="danger"
+                      disabled={journal.trips.length === 1}
+                      onClick={() => {
+                        if (
+                          confirm(
+                            `永久刪除「${trip.title}」及其全部行程、住宿、照片和費用？`,
+                          )
+                        )
+                          safely(() => {
+                            stopRequest();
+                            const trips = current.current!.trips.filter(
+                              (t) => t.id !== trip.id,
+                            );
+                            commit({
+                              ...current.current!,
+                              trips,
+                              activeTripId: trips[0].id,
+                            });
+                            setDay(1);
+                          });
+                      }}
+                    >
+                      刪除這趟旅行
+                    </button>
+                  </div>
+                  <p className="hint">至少保留一趟旅行。刪除前建議匯出備份。</p>
+                </div>
+              </div>
+            </section>
+          )}
+          <footer>
+            旅行不必完美，值得記得就好。
+            <span>TRAVEL JOURNAL · MADE FOR YOUR JOURNEY</span>
+          </footer>
+        </main>
       </div>
-    </main>
+      {importControl}
+      {editor && (
+        <Modal
+          title={
+            editor.kind === "trip"
+              ? editor.item
+                ? "編輯旅行"
+                : "新的旅行"
+              : editor.kind === "schedule"
+                ? editor.item
+                  ? "編輯行程"
+                  : "新增行程"
+                : editor.kind === "stay"
+                  ? "住宿安排"
+                  : "其他費用"
+          }
+          close={closeEditor}
+        >
+          <form onSubmit={saveForm}>
+            <div className="form-grid">
+              <Field label={editor.kind === "stay" ? "住宿名稱" : "名稱"} wide>
+                <input
+                  name="title"
+                  required
+                  maxLength={200}
+                  autoFocus
+                  defaultValue={
+                    tEdit?.title ||
+                    sEdit?.title ||
+                    hEdit?.name ||
+                    eEdit?.title ||
+                    ""
+                  }
+                  placeholder={
+                    editor.kind === "schedule"
+                      ? "例如：在海邊喝一杯咖啡"
+                      : "為這份計畫取個名字"
+                  }
+                />
+              </Field>
+              {editor.kind === "trip" && (
+                <>
+                  <Field label="出發日期">
+                    <input
+                      type="date"
+                      name="start"
+                      required
+                      defaultValue={tEdit?.days[0].date || localDate()}
+                    />
+                  </Field>
+                  <Field label="旅行天數">
+                    <input
+                      type="number"
+                      name="count"
+                      min={1}
+                      max={90}
+                      required
+                      defaultValue={tEdit?.days.length || 3}
+                    />
+                  </Field>
+                  <Field label="同行人數">
+                    <input
+                      name="people"
+                      type="number"
+                      min={1}
+                      max={50}
+                      required
+                      defaultValue={tEdit?.people || 1}
+                    />
+                  </Field>
+                  <Field label="台灣天氣城市">
+                    <input
+                      name="city"
+                      maxLength={100}
+                      required
+                      defaultValue={tEdit?.weatherLocation || "新竹"}
+                    />
+                  </Field>
+                  <Field label="記帳幣別">
+                    <select
+                      name="currency"
+                      defaultValue={tEdit?.currency || "TWD"}
+                    >
+                      {CURRENCIES.map((c) => (
+                        <option key={c}>{c}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="整趟旅行預算">
+                    <input
+                      type="number"
+                      name="budget"
+                      min={0}
+                      max={1000000000}
+                      step="0.01"
+                      required
+                      defaultValue={tEdit?.budget ?? 10000}
+                    />
+                  </Field>
+                  <p className="hint wide">
+                    更改日期或天數會重新連續排列旅行日期，並平移住宿日期；只修改其他資訊會保留原日期。縮短行程不可超出既有住宿範圍。幣別不會自動換算。
+                  </p>
+                </>
+              )}
+              {editor.kind === "schedule" && (
+                <>
+                  <Field label="所屬日期">
+                    <select
+                      name="day"
+                      defaultValue={sEdit?.day || selected.day}
+                    >
+                      {trip.days.map((d) => (
+                        <option key={d.day} value={d.day}>
+                          第 {d.day} 天 · {d.date}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="類別">
+                    <select name="tag" defaultValue={sEdit?.tag || "景點"}>
+                      {TAGS.map((t) => (
+                        <option key={t}>{t}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="開始時間">
+                    <input
+                      type="time"
+                      name="startTime"
+                      required
+                      defaultValue={sEdit?.startTime || defaultStart}
+                    />
+                  </Field>
+                  <Field label="結束時間">
+                    <input
+                      type="time"
+                      name="endTime"
+                      required
+                      defaultValue={
+                        sEdit?.endTime || toTime(toMinutes(defaultStart) + 60)
+                      }
+                    />
+                  </Field>
+                  <Field label="地點／完整地址" wide>
+                    <input
+                      name="location"
+                      maxLength={500}
+                      defaultValue={sEdit?.location}
+                      placeholder="可與名稱不同，用於地圖導航"
+                    />
+                  </Field>
+                  <Field label={`預估費用（${trip.currency}）`}>
+                    <input
+                      name="cost"
+                      type="number"
+                      min={0}
+                      max={1000000000}
+                      step="0.01"
+                      required
+                      defaultValue={sEdit?.cost || 0}
+                    />
+                  </Field>
+                  <Field label="前往下一站（分鐘）">
+                    <input
+                      name="transfer"
+                      type="number"
+                      min={0}
+                      max={1440}
+                      defaultValue={sEdit?.travelTimeToNext}
+                      placeholder="選填，自行估算"
+                    />
+                  </Field>
+                  <Field label="旅行照片（最大 12 MB，自動壓縮）" wide>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      disabled={photoBusy}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const version = photoVersion.current;
+                        setPhotoBusy(true);
+                        try {
+                          const result = await compressPhoto(file);
+                          if (version !== photoVersion.current) return;
+                          setPhoto(result);
+                          setFormError("");
+                        } catch (error) {
+                          if (version === photoVersion.current)
+                            setFormError(message(error));
+                        } finally {
+                          if (version === photoVersion.current)
+                            setPhotoBusy(false);
+                        }
+                      }}
+                    />
+                  </Field>
+                  {photo && (
+                    <div className="wide photo-preview">
+                      <Image
+                        src={photo}
+                        alt="行程照片預覽"
+                        width={400}
+                        height={240}
+                        unoptimized
+                      />
+                      <button type="button" onClick={() => setPhoto("")}>
+                        移除照片
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+              {editor.kind === "stay" && (
+                <>
+                  <Field label="入住日期">
+                    <input
+                      type="date"
+                      name="checkIn"
+                      min={trip.days[0].date}
+                      max={trip.days.at(-1)!.date}
+                      required
+                      defaultValue={hEdit?.checkIn || selected.date}
+                    />
+                  </Field>
+                  <Field label="退房日期">
+                    <input
+                      type="date"
+                      name="checkOut"
+                      min={addDays(trip.days[0].date, 1)}
+                      max={addDays(trip.days.at(-1)!.date, 1)}
+                      required
+                      defaultValue={
+                        hEdit?.checkOut || addDays(selected.date, 1)
+                      }
+                    />
+                  </Field>
+                  <Field label="地址" wide>
+                    <input
+                      name="address"
+                      maxLength={500}
+                      defaultValue={hEdit?.address}
+                    />
+                  </Field>
+                  <Field
+                    label={`整筆住宿總額（${trip.currency}，非每晚）`}
+                    wide
+                  >
+                    <input
+                      type="number"
+                      name="cost"
+                      min={0}
+                      max={1000000000}
+                      step="0.01"
+                      required
+                      defaultValue={hEdit?.cost || 0}
+                    />
+                  </Field>
+                  <label className="checkbox wide">
+                    <input
+                      name="booked"
+                      type="checkbox"
+                      defaultChecked={hEdit?.booked}
+                    />
+                    已完成訂房
+                  </label>
+                </>
+              )}
+              {editor.kind === "expense" && (
+                <>
+                  <Field label="類別">
+                    <select name="tag" defaultValue={eEdit?.category || "其他"}>
+                      {TAGS.map((t) => (
+                        <option key={t}>{t}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label={`金額（${trip.currency}）`}>
+                    <input
+                      type="number"
+                      name="cost"
+                      min={0}
+                      max={1000000000}
+                      step="0.01"
+                      required
+                      defaultValue={eEdit?.amount || 0}
+                    />
+                  </Field>
+                </>
+              )}
+              {editor.kind !== "expense" && (
+                <Field label="備註" wide>
+                  <textarea
+                    name="note"
+                    rows={3}
+                    maxLength={10000}
+                    defaultValue={
+                      tEdit?.note || sEdit?.note || hEdit?.note || ""
+                    }
+                    placeholder="訂位資訊、想吃的餐點，或一點小提醒…"
+                  />
+                </Field>
+              )}
+              {formError && (
+                <p className="form-error wide" role="alert">
+                  {formError}
+                </p>
+              )}
+            </div>
+            <div className="dialog-footer">
+              <button type="button" onClick={closeEditor}>
+                取消
+              </button>
+              <button type="submit" className="primary" disabled={photoBusy}>
+                {photoBusy ? "處理照片中…" : "儲存"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
   );
 }
